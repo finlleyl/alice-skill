@@ -12,6 +12,7 @@ type compressWriter struct {
 }
 
 func newCompressWriter(w http.ResponseWriter) *compressWriter {
+	w.Header().Set("Content-Encoding", "gzip")
 	return &compressWriter{
 		w:  w,
 		zw: gzip.NewWriter(w),
