@@ -1,7 +1,9 @@
 package main
 
 import (
+	"database/sql"
 	"github.com/finlleyl/alice-skill/internal/logger"
+	"github.com/finlleyl/alice-skill/internal/store/pg"
 	"go.uber.org/zap"
 	"net/http"
 )
@@ -18,7 +20,12 @@ func run() error {
 		return err
 	}
 
-	appInstance := newApp(nil)
+	conn, err := sql.Open("pgx", flagDatabaseURI)
+	if err != nil {
+		return err
+	}
+
+	appInstance := newApp(pg.NewStore(conn))
 
 	logger.Log.Info("Running server", zap.String("address", flagRunAddr))
 

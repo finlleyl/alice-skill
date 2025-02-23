@@ -45,30 +45,83 @@ func (a *app) webhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	messages, err := a.store.ListMessages(ctx, req.Session.User.UserID)
-	if err != nil {
-		logger.Log.Debug("cannot load messages for user", zap.Error(err))
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
+	var text string
 
-	text := "Для вас нет новых сообщений."
-	if len(messages) > 0 {
-		text = fmt.Sprintf("Для вас %d новых сообщений.", len(messages))
-	}
+	switch true {
+	case strings.HasPrefix(req.Request.Command, "Отправь"):
+		username, message := parseSendCommand(req.Request.Command)
 
-	if req.Session.New {
-		tz, err := time.LoadLocation(req.Timezone)
+		recepientID, err := a.store.FindRecepient(ctx, username)
 		if err != nil {
-			logger.Log.Debug("cannot parse timezone")
-			w.WriteHeader(http.StatusBadRequest)
+			logger.Log.Debug("cannot find recepient by username", zap.String("username", username), zap.Error(err))
+			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
 
-		now := time.Now().In(tz)
-		hour, minute, _ := now.Clock()
+		err = a.store.SaveMessage(ctx, recepientID, store.Message{
+			Sender:  req.Session.User.UserID,
+			Time:    time.Now(),
+			Payload: message,
+		})
+		if err != nil {
+			logger.Log.Debug("cannot save message", zap.String("recepient", recepientID), zap.Error(err))
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 
-		text = fmt.Sprintf("Точное время %d часов, %d минут. %s", hour, minute, text)
+		text = "Сообщение успешно отправлено"
+
+	case strings.HasPrefix(req.Request.Command, "Прочитай"):
+		messageIndex := parseReadCommand(req.Request.Command)
+
+		messages, err := a.store.ListMessages(ctx, req.Session.User.UserID)
+		if err != nil {
+			logger.Log.Debug("cannot load messages for user", zap.Error(err))
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		text = "Для вас нет новых сообщений."
+		if len(messages) < messageIndex {
+			text = "Такого сообщения не существует."
+		} else {
+			messageID := messages[messageIndex].ID
+			message, err := a.store.GetMessage(ctx, messageID)
+			if err != nil {
+				logger.Log.Debug("cannot load message", zap.Int64("id", messageID), zap.Error(err))
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+
+			text = fmt.Sprintf("Сообщение от %s, отправлено %s: %s", message.Sender, message.Time, message.Payload)
+		}
+
+	default:
+		messages, err := a.store.ListMessages(ctx, req.Session.User.UserID)
+		if err != nil {
+			logger.Log.Debug("cannot load messages for user", zap.Error(err))
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		text = "Для вас нет новых сообщений."
+		if len(messages) > 0 {
+			text = fmt.Sprintf("Для вас %d новых сообщений.", len(messages))
+		}
+
+		if req.Session.New {
+			tz, err := time.LoadLocation(req.Timezone)
+			if err != nil {
+				logger.Log.Debug("cannot parse timezone")
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+
+			now := time.Now().In(tz)
+			hour, minute, _ := now.Clock()
+
+			text = fmt.Sprintf("Точное время %d часов, %d минут. %s", hour, minute, text)
+		}
 	}
 
 	resp := models.Response{
