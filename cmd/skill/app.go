@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -14,11 +15,19 @@ import (
 )
 
 type app struct {
-	store store.Store
+	store   store.Store
+	msgChan chan store.Message
 }
 
 func newApp(s store.Store) *app {
-	return &app{store: s}
+	instance := &app{
+		store:   s,
+		msgChan: make(chan store.Message, 1024),
+	}
+
+	go instance.flushMessages()
+
+	return instance
 }
 
 func (a *app) webhook(w http.ResponseWriter, r *http.Request) {
@@ -58,15 +67,11 @@ func (a *app) webhook(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		err = a.store.SaveMessage(ctx, recepientID, store.Message{
-			Sender:  req.Session.User.UserID,
-			Time:    time.Now(),
-			Payload: message,
-		})
-		if err != nil {
-			logger.Log.Debug("cannot save message", zap.String("recepient", recepientID), zap.Error(err))
-			w.WriteHeader(http.StatusInternalServerError)
-			return
+		a.msgChan <- store.Message{
+			Sender:    req.Session.User.UserID,
+			Recepient: recepientID,
+			Time:      time.Now(),
+			Payload:   message,
 		}
 
 		text = "Сообщение успешно отправлено"
@@ -94,6 +99,27 @@ func (a *app) webhook(w http.ResponseWriter, r *http.Request) {
 			}
 
 			text = fmt.Sprintf("Сообщение от %s, отправлено %s: %s", message.Sender, message.Time, message.Payload)
+		}
+
+	case strings.HasPrefix(req.Request.Command, "Зарегистрируй"):
+		// гипотетическая функция parseRegisterCommand вычленит из запроса
+		// желаемое имя нового пользователя
+		username := parseRegisterCommand(req.Request.Command)
+
+		// регистрируем пользователя
+		err := a.store.RegisterUser(ctx, req.Session.User.UserID, username)
+		// наличие неспецифичной ошибки
+		if err != nil && !errors.Is(err, store.ErrConflict) {
+			logger.Log.Debug("cannot register user", zap.Error(err))
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		// определяем правильное ответное сообщение пользователю
+		text = fmt.Sprintf("Вы успешно зарегистрированы под именем %s", username)
+		if errors.Is(err, store.ErrConflict) {
+			// ошибка специфична для случая конфликта имён пользователей
+			text = "Извините, такое имя уже занято. Попробуйте другое."
 		}
 
 	default:
@@ -165,5 +191,34 @@ func gzipMiddleware(h http.HandlerFunc) http.HandlerFunc {
 			defer cr.Close()
 		}
 		h.ServeHTTP(ow, r)
+	}
+}
+
+func (a *app) flushMessages() {
+	// будем сохранять сообщения, накопленные за последние 10 секунд
+	ticker := time.NewTicker(10 * time.Second)
+
+	var messages []store.Message
+
+	for {
+		select {
+		case msg := <-a.msgChan:
+			// добавим сообщение в слайс для последующего сохранения
+			messages = append(messages, msg)
+		case <-ticker.C:
+			// подождём, пока придёт хотя бы одно сообщение
+			if len(messages) == 0 {
+				continue
+			}
+			// сохраним все пришедшие сообщения одновременно
+			err := a.store.SaveMessages(context.TODO(), messages...)
+			if err != nil {
+				logger.Log.Debug("cannot save messages", zap.Error(err))
+				// не будем стирать сообщения, попробуем отправить их чуть позже
+				continue
+			}
+			// сотрём успешно отосланные сообщения
+			messages = nil
+		}
 	}
 }

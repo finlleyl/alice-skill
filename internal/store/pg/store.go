@@ -3,7 +3,12 @@ package pg
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
 	"github.com/finlleyl/alice-skill/internal/store"
+	"github.com/jackc/pgerrcode"
+	"github.com/jackc/pgx/v5/pgconn"
+	"strings"
 	"time"
 )
 
@@ -108,13 +113,37 @@ func (s Store) GetMessage(ctx context.Context, id int64) (*store.Message, error)
 	return &msg, nil
 }
 
-func (s Store) SaveMessage(ctx context.Context, userID string, msg store.Message) error {
+func (s Store) SaveMessages(ctx context.Context, messages ...store.Message) error {
+	var values []string
+	var args []any
+	for i, msg := range messages {
+		base := i * 4
+		params := fmt.Sprintf("($%d, $%d, $%d, $%d)", base+1, base+2, base+3, base+4)
+		values = append(values, params)
+		args = append(args, msg.Sender, msg.Recepient, msg.Payload, msg.Time)
+	}
+
+	query := `
+  INSERT INTO messages
+  (sender, recepient, payload, sent_at)
+  VALUES ` + strings.Join(values, ",") + `;`
+
+	_, err := s.conn.ExecContext(ctx, query, args...)
+
+	return err
+}
+
+func (s Store) RegisterUser(ctx context.Context, userID string, username string) error {
 	_, err := s.conn.ExecContext(ctx, `
-        INSERT INTO messages
-        (sender, recepient, payload, sent_at)
-        VALUES
-        ($1, $2, $3, $4);
-    `, msg.Sender, userID, msg.Payload, time.Now())
+INSERT INTO users
+(id, username) VALUES ($1, $2);`, userID, username)
+
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgerrcode.IsIntegrityConstraintViolation(pgErr.Code) {
+			err = store.ErrConflict
+		}
+	}
 
 	return err
 }
